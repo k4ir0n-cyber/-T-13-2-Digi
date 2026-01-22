@@ -1,0 +1,542 @@
+import React, { useState } from 'react';
+import { base44 } from '@/api/base44Client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { 
+  Shield, 
+  AlertTriangle, 
+  Key, 
+  Clock, 
+  Search,
+  RefreshCw,
+  Loader2,
+  Bell,
+  CheckCircle2
+} from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import StatsCard from "../components/dashboard/StatsCard";
+import BreachAlert from "../components/dashboard/BreachAlert";
+import RiskAssessment from "../components/dashboard/RiskAssessment";
+import ChangePasswordDialog from "../components/password/ChangePasswordDialog";
+import { toast } from "sonner";
+import { differenceInDays } from "date-fns";
+
+export default function Dashboard() {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [severityFilter, setSeverityFilter] = useState("all");
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [selectedBreach, setSelectedBreach] = useState(null);
+  const [selectedPlatform, setSelectedPlatform] = useState(null);
+  const [isCheckingBreaches, setIsCheckingBreaches] = useState(false);
+  
+  const queryClient = useQueryClient();
+
+  const { data: breaches = [], isLoading: breachesLoading } = useQuery({
+    queryKey: ['breaches'],
+    queryFn: () => base44.entities.DataBreach.list('-discovered_date', 50),
+  });
+
+  const { data: platforms = [] } = useQuery({
+    queryKey: ['platforms'],
+    queryFn: () => base44.entities.Platform.list(),
+  });
+
+  const { data: passwordChanges = [] } = useQuery({
+    queryKey: ['passwordChanges'],
+    queryFn: () => base44.entities.PasswordChange.list('-change_date', 100),
+  });
+
+  const updateBreachMutation = useMutation({
+    mutationFn: ({ id, data }) => base44.entities.DataBreach.update(id, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['breaches'] }),
+  });
+
+  const createPasswordChangeMutation = useMutation({
+    mutationFn: (data) => base44.entities.PasswordChange.create(data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passwordChanges'] }),
+  });
+
+  const updatePlatformMutation = useMutation({
+    mutationFn: ({ id, data }) => base44.entities.Platform.update(id, data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['platforms'] }),
+  });
+
+  const platformNames = platforms.map(p => p.name.toLowerCase());
+
+  const handleBreachAction = (breach, action) => {
+    if (action === 'change_password') {
+      const matchingPlatform = platforms.find(
+        p => p.name.toLowerCase() === breach.platform_name.toLowerCase()
+      );
+      setSelectedBreach(breach);
+      setSelectedPlatform(matchingPlatform || { name: breach.platform_name });
+      setPasswordDialogOpen(true);
+    } else if (action === 'ignore') {
+      updateBreachMutation.mutate({
+        id: breach.id,
+        data: { status: 'ignoreeritud' }
+      });
+      toast.success("Leke märgitud ignoreeriduks");
+    }
+  };
+
+  const handlePasswordChangeConfirm = async ({ platform, breach, notes }) => {
+    await createPasswordChangeMutation.mutateAsync({
+      platform_id: platform?.id,
+      platform_name: platform?.name || breach?.platform_name,
+      change_date: new Date().toISOString().split('T')[0],
+      reason: breach ? 'leke' : 'rutiinne',
+      breach_id: breach?.id,
+      notes
+    });
+
+    if (platform?.id) {
+      await updatePlatformMutation.mutateAsync({
+        id: platform.id,
+        data: { last_password_change: new Date().toISOString().split('T')[0] }
+      });
+    }
+
+    if (breach) {
+      await updateBreachMutation.mutateAsync({
+        id: breach.id,
+        data: { status: 'reageeritud' }
+      });
+    }
+
+    toast.success("Parooli vahetus registreeritud!");
+  };
+
+  const calculateRiskScore = (breach, platform) => {
+    let score = 0;
+    
+    // Priority score (0-40 points)
+    if (platform) {
+      const priorityScores = {
+        'kriitiline': 40,
+        'kõrge': 30,
+        'keskmine': 20,
+        'madal': 10
+      };
+      score += priorityScores[platform.priority] || 10;
+    } else {
+      score += 5; // Platform not in user's list
+    }
+    
+    // Affected data score (0-30 points)
+    const criticalData = ['paroolid', 'krediitkaardi andmed', 'isikukood'];
+    const sensitiveData = ['e-mailid', 'telefoninumbrid', 'aadressid'];
+    
+    if (breach.affected_data) {
+      const hasCritical = breach.affected_data.some(d => 
+        criticalData.some(cd => d.toLowerCase().includes(cd.toLowerCase()))
+      );
+      const hasSensitive = breach.affected_data.some(d => 
+        sensitiveData.some(sd => d.toLowerCase().includes(sd.toLowerCase()))
+      );
+      
+      if (hasCritical) score += 30;
+      else if (hasSensitive) score += 20;
+      else score += 10;
+    }
+    
+    // Severity score (0-20 points)
+    const severityScores = {
+      'kriitiline': 20,
+      'kõrge': 15,
+      'keskmine': 10,
+      'madal': 5
+    };
+    score += severityScores[breach.severity] || 5;
+    
+    // Password age score (0-10 points)
+    if (platform?.last_password_change) {
+      const days = differenceInDays(new Date(), new Date(platform.last_password_change));
+      if (days > 180) score += 10;
+      else if (days > 90) score += 7;
+      else if (days > 30) score += 4;
+    } else if (platform) {
+      score += 10; // Never changed
+    }
+    
+    return Math.min(Math.round(score), 100);
+  };
+
+  const getRecommendations = () => {
+    const recommendations = [];
+    
+    // Check breaches affecting user platforms
+    breaches
+      .filter(b => b.status !== 'reageeritud' && b.status !== 'ignoreeritud')
+      .forEach(breach => {
+        const platform = platforms.find(
+          p => p.name.toLowerCase() === breach.platform_name.toLowerCase()
+        );
+        
+        if (platform || breach.user_affected) {
+          const reasons = [];
+          const riskScore = calculateRiskScore(breach, platform);
+          
+          if (breach.affected_data?.some(d => d.toLowerCase().includes('parool'))) {
+            reasons.push('Paroolid lekkisid');
+          }
+          if (platform?.priority === 'kriitiline' || platform?.priority === 'kõrge') {
+            reasons.push(`${platform.priority} prioriteediga platvorm`);
+          }
+          if (breach.severity === 'kriitiline' || breach.severity === 'kõrge') {
+            reasons.push(`${breach.severity} raskusastmega leke`);
+          }
+          
+          const daysSinceChange = platform?.last_password_change 
+            ? differenceInDays(new Date(), new Date(platform.last_password_change))
+            : null;
+          
+          if (daysSinceChange && daysSinceChange > 90) {
+            reasons.push(`Parool ${daysSinceChange} päeva vana`);
+          }
+          
+          recommendations.push({
+            platform_id: platform?.id,
+            platform_name: breach.platform_name,
+            breach_id: breach.id,
+            risk_score: riskScore,
+            reasons,
+            days_since_change: daysSinceChange,
+            affected_data_types: breach.affected_data?.length || 0
+          });
+        }
+      });
+    
+    // Check old passwords even without breaches
+    platforms.forEach(platform => {
+      const daysSinceChange = platform.last_password_change 
+        ? differenceInDays(new Date(), new Date(platform.last_password_change))
+        : null;
+      
+      if ((daysSinceChange && daysSinceChange > 180) || (!platform.last_password_change && platform.priority === 'kriitiline')) {
+        const alreadyInList = recommendations.some(r => r.platform_id === platform.id);
+        if (!alreadyInList) {
+          const reasons = [];
+          let score = 0;
+          
+          if (!platform.last_password_change) {
+            reasons.push('Parooli pole kunagi vahetatud');
+            score = 45;
+          } else {
+            reasons.push(`Parool ${daysSinceChange} päeva vana`);
+            score = 35;
+          }
+          
+          if (platform.priority === 'kriitiline') {
+            reasons.push('Kriitiline platvorm');
+            score += 30;
+          } else if (platform.priority === 'kõrge') {
+            reasons.push('Kõrge prioriteediga platvorm');
+            score += 20;
+          }
+          
+          if (!platform.has_2fa) {
+            reasons.push('2FA puudub');
+            score += 10;
+          }
+          
+          recommendations.push({
+            platform_id: platform.id,
+            platform_name: platform.name,
+            breach_id: null,
+            risk_score: Math.min(score, 100),
+            reasons,
+            days_since_change: daysSinceChange,
+            affected_data_types: 0
+          });
+        }
+      }
+    });
+    
+    return recommendations.sort((a, b) => b.risk_score - a.risk_score);
+  };
+
+  const checkForBreaches = async () => {
+    setIsCheckingBreaches(true);
+    try {
+      const response = await base44.integrations.Core.InvokeLLM({
+        prompt: `Search the internet for the latest and most critical data breaches and security incidents from the past 2 months.
+        
+        Use multiple sources:
+        1. Have I Been Pwned database
+        2. Recent cybersecurity news from major outlets
+        3. Government security advisories (CISA, NCSC, etc.)
+        4. Major tech news sites reporting breaches
+        5. Official breach notifications from companies
+        
+        Focus on:
+        - Major platforms with millions of users
+        - Recent breaches (last 2 months)
+        - Breaches affecting passwords, financial data, or personal information
+        - Both confirmed and suspected breaches
+        
+        For each breach, provide:
+        - Exact platform/company name
+        - Breach date (when it occurred)
+        - Severity assessment
+        - What types of data were compromised
+        - Approximate number of affected users
+        - Data source/where you found this information
+        - Whether it's verified/confirmed
+        
+        Return comprehensive data about recent breaches.`,
+        add_context_from_internet: true,
+        response_json_schema: {
+          type: "object",
+          properties: {
+            breaches: {
+              type: "array",
+              items: {
+                type: "object",
+                properties: {
+                  platform_name: { type: "string" },
+                  breach_date: { type: "string" },
+                  severity: { type: "string", enum: ["kriitiline", "kõrge", "keskmine", "madal"] },
+                  description: { type: "string" },
+                  affected_data: { type: "array", items: { type: "string" } },
+                  is_verified: { type: "boolean" },
+                  data_source: { type: "string" },
+                  affected_accounts: { type: "number" }
+                }
+              }
+            }
+          }
+        }
+      });
+
+      if (response.breaches && response.breaches.length > 0) {
+        let newBreachesCount = 0;
+        
+        for (const breach of response.breaches) {
+          const exists = breaches.some(
+            b => b.platform_name.toLowerCase() === breach.platform_name.toLowerCase() &&
+                 b.breach_date === breach.breach_date
+          );
+          
+          if (!exists) {
+            const isUserAffected = platformNames.includes(breach.platform_name.toLowerCase());
+            const matchingPlatform = platforms.find(
+              p => p.name.toLowerCase() === breach.platform_name.toLowerCase()
+            );
+            
+            const riskScore = calculateRiskScore(breach, matchingPlatform);
+            
+            await base44.entities.DataBreach.create({
+              ...breach,
+              discovered_date: new Date().toISOString().split('T')[0],
+              status: 'uus',
+              user_affected: isUserAffected,
+              risk_score: riskScore
+            });
+            
+            newBreachesCount++;
+          }
+        }
+        
+        queryClient.invalidateQueries({ queryKey: ['breaches'] });
+        
+        if (newBreachesCount > 0) {
+          toast.success(`Leiti ${newBreachesCount} uut lekke (kokku ${response.breaches.length} kontrollitud)`);
+        } else {
+          toast.info(`Kontrolliti ${response.breaches.length} lekke - uusi ei leitud`);
+        }
+      } else {
+        toast.info("Uusi lekkeid ei leitud");
+      }
+    } catch (error) {
+      toast.error("Viga lekkide kontrollimisel");
+    }
+    setIsCheckingBreaches(false);
+  };
+
+  // Get recommendations
+  const recommendations = getRecommendations();
+  const highRiskRecommendations = recommendations.filter(r => r.risk_score >= 60);
+
+  // Stats calculations
+  const newBreaches = breaches.filter(b => b.status === 'uus').length;
+  const userAffectedBreaches = breaches.filter(b => 
+    platformNames.includes(b.platform_name.toLowerCase())
+  );
+  const oldPasswords = platforms.filter(p => {
+    if (!p.last_password_change) return true;
+    return differenceInDays(new Date(), new Date(p.last_password_change)) > 90;
+  }).length;
+  const recentChanges = passwordChanges.filter(c => 
+    differenceInDays(new Date(), new Date(c.change_date)) <= 30
+  ).length;
+
+  // Filter breaches
+  const filteredBreaches = breaches.filter(breach => {
+    const matchesSearch = breach.platform_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                         breach.description?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesSeverity = severityFilter === 'all' || breach.severity === severityFilter;
+    return matchesSearch && matchesSeverity;
+  });
+
+  return (
+    <div className="min-h-screen bg-black">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+          <div>
+            <h1 className="text-3xl font-bold text-white">Turvakeskus</h1>
+            <p className="text-zinc-400 mt-1">Jälgi lekkeid ja halda oma paroolide turvalisust</p>
+          </div>
+          <Button 
+            onClick={checkForBreaches}
+            disabled={isCheckingBreaches}
+            className="bg-red-600 hover:bg-red-700"
+          >
+            {isCheckingBreaches ? (
+              <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+            ) : (
+              <RefreshCw className="w-4 h-4 mr-2" />
+            )}
+            Kontrolli lekkeid
+          </Button>
+        </div>
+
+        {/* Stats */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+          <StatsCard
+            title="Uued hoiatused"
+            value={newBreaches}
+            icon={Bell}
+            color={newBreaches > 0 ? "text-red-600" : "text-green-600"}
+            delay={0}
+          />
+          <StatsCard
+            title="Sinu platvormid ohus"
+            value={userAffectedBreaches.length}
+            icon={AlertTriangle}
+            color={userAffectedBreaches.length > 0 ? "text-orange-600" : "text-green-600"}
+            delay={0.1}
+          />
+          <StatsCard
+            title="Vanad paroolid"
+            value={oldPasswords}
+            subtitle="Üle 90 päeva"
+            icon={Clock}
+            color={oldPasswords > 0 ? "text-yellow-600" : "text-green-600"}
+            delay={0.2}
+          />
+          <StatsCard
+            title="Vahetatud (30p)"
+            value={recentChanges}
+            icon={CheckCircle2}
+            color="text-green-600"
+            delay={0.3}
+          />
+        </div>
+
+        {/* Risk Assessment Section */}
+        {recommendations.length > 0 && (
+          <div className="mb-6">
+            <RiskAssessment 
+              recommendations={recommendations}
+              platforms={platforms}
+              onChangePassword={(platform) => {
+                setSelectedPlatform(platform);
+                setPasswordDialogOpen(true);
+              }}
+            />
+          </div>
+        )}
+
+        {/* User affected breaches alert */}
+        {userAffectedBreaches.filter(b => b.status === 'uus').length > 0 && highRiskRecommendations.length === 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -10 }}
+            animate={{ opacity: 1, y: 0 }}
+            className="mb-6 p-4 bg-red-50 border-2 border-red-200 rounded-xl"
+          >
+            <div className="flex items-center gap-3">
+              <AlertTriangle className="w-6 h-6 text-red-600" />
+              <div>
+                <h3 className="font-semibold text-red-800">
+                  {userAffectedBreaches.filter(b => b.status === 'uus').length} sinu platvormi on mõjutatud!
+                </h3>
+                <p className="text-red-600 text-sm">
+                  Soovitame koheselt paroole vahetada
+                </p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* Section Title */}
+        <div className="mb-4">
+          <h2 className="text-xl font-semibold text-white">Kõik leked</h2>
+          <p className="text-sm text-zinc-400">Detailne vaade kõigist teadaolevatest leketest</p>
+        </div>
+
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Input
+              placeholder="Otsi platvormi..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          <Tabs value={severityFilter} onValueChange={setSeverityFilter}>
+            <TabsList>
+              <TabsTrigger value="all">Kõik</TabsTrigger>
+              <TabsTrigger value="kriitiline">Kriitiline</TabsTrigger>
+              <TabsTrigger value="kõrge">Kõrge</TabsTrigger>
+              <TabsTrigger value="keskmine">Keskmine</TabsTrigger>
+            </TabsList>
+          </Tabs>
+        </div>
+
+        {/* Breaches list */}
+        <div className="space-y-4">
+          {breachesLoading ? (
+            <div className="flex items-center justify-center py-12">
+              <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
+            </div>
+          ) : filteredBreaches.length === 0 ? (
+            <div className="text-center py-12">
+              <Shield className="w-12 h-12 text-red-500 mx-auto mb-4" />
+              <h3 className="text-lg font-medium text-white">Kõik on korras!</h3>
+              <p className="text-zinc-400">Hetkel lekkeid ei leitud</p>
+            </div>
+          ) : (
+            <AnimatePresence>
+              {filteredBreaches.map((breach) => (
+                <BreachAlert
+                  key={breach.id}
+                  breach={breach}
+                  onAction={handleBreachAction}
+                  isUserPlatform={platformNames.includes(breach.platform_name.toLowerCase())}
+                />
+              ))}
+            </AnimatePresence>
+          )}
+        </div>
+      </div>
+
+      <ChangePasswordDialog
+        isOpen={passwordDialogOpen}
+        onClose={() => {
+          setPasswordDialogOpen(false);
+          setSelectedBreach(null);
+          setSelectedPlatform(null);
+        }}
+        platform={selectedPlatform}
+        breach={selectedBreach}
+        onConfirm={handlePasswordChangeConfirm}
+      />
+    </div>
+  );
+}

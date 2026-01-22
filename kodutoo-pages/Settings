@@ -1,0 +1,171 @@
+import React, { useState, useEffect } from 'react';
+import { base44 } from '@/api/base44Client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { 
+  Bell, 
+  Key, 
+  Shield, 
+  Save,
+  Loader2
+} from "lucide-react";
+import { toast } from "sonner";
+
+export default function Settings() {
+  const queryClient = useQueryClient();
+  const [isLoading, setIsLoading] = useState(false);
+
+  const { data: settings } = useQuery({
+    queryKey: ['userSettings'],
+    queryFn: async () => {
+      const list = await base44.entities.UserSettings.list();
+      return list[0] || null;
+    },
+  });
+
+  const [formData, setFormData] = useState({
+    notification_level: 'kõik',
+    auto_check_breaches: true,
+    password_reminder_days: 90,
+    default_password_length: 16,
+    include_symbols: true,
+    include_numbers: true
+  });
+
+  useEffect(() => {
+    if (settings) {
+      setFormData({
+        notification_level: settings.notification_level || 'kõik',
+        auto_check_breaches: settings.auto_check_breaches ?? true,
+        password_reminder_days: settings.password_reminder_days || 90,
+        default_password_length: settings.default_password_length || 16,
+        include_symbols: settings.include_symbols ?? true,
+        include_numbers: settings.include_numbers ?? true
+      });
+    }
+  }, [settings]);
+
+  const saveMutation = useMutation({
+    mutationFn: async (data) => {
+      if (settings) {
+        return base44.entities.UserSettings.update(settings.id, data);
+      } else {
+        return base44.entities.UserSettings.create(data);
+      }
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['userSettings'] });
+      toast.success("Seaded salvestatud!");
+    },
+  });
+
+  const handleSave = async () => {
+    setIsLoading(true);
+    await saveMutation.mutateAsync(formData);
+    setIsLoading(false);
+  };
+
+  const notificationLevels = [
+    { value: "kõik", label: "Kõik teavitused" },
+    { value: "ainult_kriitilised", label: "Ainult kriitilised" },
+    { value: "ainult_minu_platvormid", label: "Ainult minu platvormid" },
+    { value: "väljas", label: "Teavitused väljas" }
+  ];
+
+  return (
+    <div className="min-h-screen bg-black">
+      <div className="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-white">Seaded</h1>
+          <p className="text-zinc-400 mt-1">Kohanda rakenduse käitumist</p>
+        </div>
+
+        <div className="space-y-6">
+          {/* Notifications */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Bell className="w-5 h-5" />
+                Teavitused
+              </CardTitle>
+              <CardDescription>
+                Halda, kuidas sind teavitatakse leketest
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-2">
+                <Label>Teavituste tase</Label>
+                <Select 
+                  value={formData.notification_level} 
+                  onValueChange={(value) => setFormData({ ...formData, notification_level: value })}
+                >
+                  <SelectTrigger>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {notificationLevels.map(level => (
+                      <SelectItem key={level.value} value={level.value}>
+                        {level.label}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="flex items-center justify-between p-4 bg-slate-50 rounded-lg">
+                <div>
+                  <Label htmlFor="auto_check">Automaatne lekkide kontroll</Label>
+                  <p className="text-sm text-slate-500">Kontrolli lekkeid automaatselt</p>
+                </div>
+                <Switch
+                  id="auto_check"
+                  checked={formData.auto_check_breaches}
+                  onCheckedChange={(checked) => setFormData({ ...formData, auto_check_breaches: checked })}
+                />
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Password Settings */}
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <Key className="w-5 h-5" />
+                Parooli seaded
+              </CardTitle>
+              <CardDescription>
+                Kohanda parooli genereerimist ja meeldetuletusi
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label>Meeldetuletus vanade paroolide kohta</Label>
+                  <span className="text-sm font-medium text-slate-900">
+                    {formData.password_reminder_days} päeva
+                  </span>
+                </div>
+                <Slider
+                  value={[formData.password_reminder_days]}
+                  onValueChange={(value) => setFormData({ ...formData, password_reminder_days: value[0] })}
+                  min={30}
+                  max={180}
+                  step={30}
+                />
+                <p className="text-sm text-slate-500">
+                  Tuletan meelde, kui parool on vanem kui {formData.password_reminder_days} päeva
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <Label>Vaikimisi parooli pikkus</Label>
+                  <span className="text-sm font-medium text-slate-900">
+ 

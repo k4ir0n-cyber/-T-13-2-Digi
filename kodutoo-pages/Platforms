@@ -1,0 +1,292 @@
+import React, { useState } from 'react';
+import { base44 } from '@/api/base44Client';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { 
+  Plus, 
+  Search, 
+  LayoutGrid, 
+  List,
+  Loader2,
+  FolderOpen
+} from "lucide-react";
+import { AnimatePresence, motion } from "framer-motion";
+import PlatformCard from "../components/platforms/PlatformCard";
+import PlatformForm from "../components/platforms/PlatformForm";
+import ChangePasswordDialog from "../components/password/ChangePasswordDialog";
+import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+
+export default function Platforms() {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("all");
+  const [viewMode, setViewMode] = useState("grid");
+  const [formOpen, setFormOpen] = useState(false);
+  const [editingPlatform, setEditingPlatform] = useState(null);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [platformToDelete, setPlatformToDelete] = useState(null);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+  const [selectedPlatform, setSelectedPlatform] = useState(null);
+
+  const queryClient = useQueryClient();
+
+  const { data: platforms = [], isLoading } = useQuery({
+    queryKey: ['platforms'],
+    queryFn: () => base44.entities.Platform.list('name'),
+  });
+
+  const createMutation = useMutation({
+    mutationFn: (data) => base44.entities.Platform.create(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['platforms'] });
+      toast.success("Platvorm lisatud!");
+    },
+  });
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }) => base44.entities.Platform.update(id, data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['platforms'] });
+      toast.success("Platvorm uuendatud!");
+    },
+  });
+
+  const deleteMutation = useMutation({
+    mutationFn: (id) => base44.entities.Platform.delete(id),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['platforms'] });
+      toast.success("Platvorm kustutatud!");
+    },
+  });
+
+  const createPasswordChangeMutation = useMutation({
+    mutationFn: (data) => base44.entities.PasswordChange.create(data),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['passwordChanges'] }),
+  });
+
+  const handleSubmit = async (data) => {
+    if (editingPlatform) {
+      await updateMutation.mutateAsync({ id: editingPlatform.id, data });
+    } else {
+      await createMutation.mutateAsync(data);
+    }
+    setFormOpen(false);
+    setEditingPlatform(null);
+  };
+
+  const handleEdit = (platform) => {
+    setEditingPlatform(platform);
+    setFormOpen(true);
+  };
+
+  const handleDelete = (platform) => {
+    setPlatformToDelete(platform);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = async () => {
+    if (platformToDelete) {
+      await deleteMutation.mutateAsync(platformToDelete.id);
+      setDeleteDialogOpen(false);
+      setPlatformToDelete(null);
+    }
+  };
+
+  const handleChangePassword = (platform) => {
+    setSelectedPlatform(platform);
+    setPasswordDialogOpen(true);
+  };
+
+  const handlePasswordChangeConfirm = async ({ platform, notes }) => {
+    await createPasswordChangeMutation.mutateAsync({
+      platform_id: platform.id,
+      platform_name: platform.name,
+      change_date: new Date().toISOString().split('T')[0],
+      reason: 'rutiinne',
+      notes
+    });
+
+    await updateMutation.mutateAsync({
+      id: platform.id,
+      data: { last_password_change: new Date().toISOString().split('T')[0] }
+    });
+
+    toast.success("Parooli vahetus registreeritud!");
+  };
+
+  const filteredPlatforms = platforms.filter(platform => {
+    const matchesSearch = platform.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+                         platform.email?.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesCategory = categoryFilter === 'all' || platform.category === categoryFilter;
+    return matchesSearch && matchesCategory;
+  });
+
+  const categories = [
+    { value: "all", label: "Kõik kategooriad" },
+    { value: "sotsiaalmeedia", label: "Sotsiaalmeedia" },
+    { value: "finants", label: "Finants" },
+    { value: "töö", label: "Töö" },
+    { value: "meelelahutus", label: "Meelelahutus" },
+    { value: "e-post", label: "E-post" },
+    { value: "pood", label: "E-pood" },
+    { value: "muu", label: "Muu" }
+  ];
+
+  return (
+    <div className="min-h-screen bg-black">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 mb-8">
+          <div>
+            <h1 className="text-3xl font-bold text-white">Minu platvormid</h1>
+            <p className="text-zinc-400 mt-1">Halda oma kontosid ja paroole</p>
+          </div>
+          <Button 
+            onClick={() => {
+              setEditingPlatform(null);
+              setFormOpen(true);
+            }}
+            className="bg-red-600 hover:bg-red-700"
+          >
+            <Plus className="w-4 h-4 mr-2" />
+            Lisa platvorm
+          </Button>
+        </div>
+
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+          <div className="relative flex-1 max-w-md">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Input
+              placeholder="Otsi platvormi..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          
+          <Select value={categoryFilter} onValueChange={setCategoryFilter}>
+            <SelectTrigger className="w-48">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {categories.map(cat => (
+                <SelectItem key={cat.value} value={cat.value}>
+                  {cat.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <div className="flex border rounded-lg overflow-hidden">
+            <Button
+              variant={viewMode === 'grid' ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={() => setViewMode('grid')}
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </Button>
+            <Button
+              variant={viewMode === 'list' ? 'secondary' : 'ghost'}
+              size="icon"
+              onClick={() => setViewMode('list')}
+            >
+              <List className="w-4 h-4" />
+            </Button>
+          </div>
+        </div>
+
+        {/* Platforms */}
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
+          </div>
+        ) : filteredPlatforms.length === 0 ? (
+          <div className="text-center py-12">
+            <FolderOpen className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-slate-900">
+              {platforms.length === 0 ? 'Platvorme pole veel lisatud' : 'Platvorme ei leitud'}
+            </h3>
+            <p className="text-slate-500 mb-4">
+              {platforms.length === 0 ? 'Lisa oma esimene platvorm, et alustada' : 'Proovi teist otsingut'}
+            </p>
+            {platforms.length === 0 && (
+              <Button onClick={() => setFormOpen(true)}>
+                <Plus className="w-4 h-4 mr-2" />
+                Lisa platvorm
+              </Button>
+            )}
+          </div>
+        ) : (
+          <motion.div 
+            className={viewMode === 'grid' 
+              ? 'grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4'
+              : 'space-y-3'
+            }
+          >
+            <AnimatePresence>
+              {filteredPlatforms.map((platform) => (
+                <PlatformCard
+                  key={platform.id}
+                  platform={platform}
+                  onEdit={handleEdit}
+                  onDelete={handleDelete}
+                  onChangePassword={handleChangePassword}
+                />
+              ))}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </div>
+
+      <PlatformForm
+        platform={editingPlatform}
+        isOpen={formOpen}
+        onSubmit={handleSubmit}
+        onCancel={() => {
+          setFormOpen(false);
+          setEditingPlatform(null);
+        }}
+      />
+
+      <AlertDialog open={deleteDialogOpen} onOpenChange={setDeleteDialogOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Kustuta platvorm?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Kas oled kindel, et soovid kustutada platvormi "{platformToDelete?.name}"? 
+              See tegevus on pöördumatu.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Tühista</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmDelete} className="bg-red-600 hover:bg-red-700">
+              Kustuta
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <ChangePasswordDialog
+        isOpen={passwordDialogOpen}
+        onClose={() => {
+          setPasswordDialogOpen(false);
+          setSelectedPlatform(null);
+        }}
+        platform={selectedPlatform}
+        onConfirm={handlePasswordChangeConfirm}
+      />
+    </div>
+  );
+}

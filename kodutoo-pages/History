@@ -1,0 +1,171 @@
+import React, { useState } from 'react';
+import { base44 } from '@/api/base44Client';
+import { useQuery } from '@tanstack/react-query';
+import { Input } from "@/components/ui/input";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Calendar } from "@/components/ui/calendar";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
+import { Button } from "@/components/ui/button";
+import { 
+  Search, 
+  CalendarIcon, 
+  Loader2,
+  History as HistoryIcon,
+  Filter
+} from "lucide-react";
+import { format, isWithinInterval, startOfMonth, endOfMonth } from "date-fns";
+import { et } from "date-fns/locale";
+import { AnimatePresence } from "framer-motion";
+import PasswordHistoryItem from "../components/history/PasswordHistoryItem";
+
+export default function History() {
+  const [searchQuery, setSearchQuery] = useState("");
+  const [reasonFilter, setReasonFilter] = useState("all");
+  const [dateRange, setDateRange] = useState({
+    from: startOfMonth(new Date()),
+    to: endOfMonth(new Date())
+  });
+
+  const { data: passwordChanges = [], isLoading } = useQuery({
+    queryKey: ['passwordChanges'],
+    queryFn: () => base44.entities.PasswordChange.list('-change_date'),
+  });
+
+  const filteredChanges = passwordChanges.filter(change => {
+    const matchesSearch = change.platform_name.toLowerCase().includes(searchQuery.toLowerCase());
+    const matchesReason = reasonFilter === 'all' || change.reason === reasonFilter;
+    
+    let matchesDate = true;
+    if (dateRange.from && dateRange.to) {
+      const changeDate = new Date(change.change_date);
+      matchesDate = isWithinInterval(changeDate, { start: dateRange.from, end: dateRange.to });
+    }
+    
+    return matchesSearch && matchesReason && matchesDate;
+  });
+
+  const reasons = [
+    { value: "all", label: "Kõik põhjused" },
+    { value: "leke", label: "Andmeleke" },
+    { value: "rutiinne", label: "Rutiinne" },
+    { value: "kahtlane_tegevus", label: "Kahtlane tegevus" },
+    { value: "muu", label: "Muu" }
+  ];
+
+  // Stats
+  const totalChanges = passwordChanges.length;
+  const leakChanges = passwordChanges.filter(c => c.reason === 'leke').length;
+  const routineChanges = passwordChanges.filter(c => c.reason === 'rutiinne').length;
+
+  return (
+    <div className="min-h-screen bg-black">
+      <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-3xl font-bold text-white">Paroolide ajalugu</h1>
+          <p className="text-zinc-400 mt-1">Vaata kõiki parooli vahetusi</p>
+        </div>
+
+        {/* Quick Stats */}
+        <div className="grid grid-cols-3 gap-4 mb-8">
+          <div className="bg-white rounded-xl p-4 border border-slate-200">
+            <p className="text-sm text-slate-500">Kokku vahetusi</p>
+            <p className="text-2xl font-bold text-slate-900">{totalChanges}</p>
+          </div>
+          <div className="bg-white rounded-xl p-4 border border-slate-200">
+            <p className="text-sm text-slate-500">Lekkede tõttu</p>
+            <p className="text-2xl font-bold text-red-600">{leakChanges}</p>
+          </div>
+          <div className="bg-white rounded-xl p-4 border border-slate-200">
+            <p className="text-sm text-slate-500">Rutiinsed</p>
+            <p className="text-2xl font-bold text-blue-600">{routineChanges}</p>
+          </div>
+        </div>
+
+        {/* Filters */}
+        <div className="flex flex-col sm:flex-row gap-4 mb-6">
+          <div className="relative flex-1">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" />
+            <Input
+              placeholder="Otsi platvormi..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          
+          <Select value={reasonFilter} onValueChange={setReasonFilter}>
+            <SelectTrigger className="w-48">
+              <Filter className="w-4 h-4 mr-2" />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {reasons.map(r => (
+                <SelectItem key={r.value} value={r.value}>
+                  {r.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+
+          <Popover>
+            <PopoverTrigger asChild>
+              <Button variant="outline" className="justify-start">
+                <CalendarIcon className="w-4 h-4 mr-2" />
+                {dateRange.from && dateRange.to ? (
+                  <>
+                    {format(dateRange.from, "d. MMM", { locale: et })} -{" "}
+                    {format(dateRange.to, "d. MMM yyyy", { locale: et })}
+                  </>
+                ) : (
+                  "Vali kuupäevad"
+                )}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent className="w-auto p-0" align="end">
+              <Calendar
+                mode="range"
+                selected={dateRange}
+                onSelect={setDateRange}
+                numberOfMonths={2}
+                locale={et}
+              />
+            </PopoverContent>
+          </Popover>
+        </div>
+
+        {/* History list */}
+        {isLoading ? (
+          <div className="flex items-center justify-center py-12">
+            <Loader2 className="w-8 h-8 animate-spin text-slate-400" />
+          </div>
+        ) : filteredChanges.length === 0 ? (
+          <div className="text-center py-12">
+            <HistoryIcon className="w-12 h-12 text-slate-300 mx-auto mb-4" />
+            <h3 className="text-lg font-medium text-slate-900">
+              {passwordChanges.length === 0 ? 'Ajalugu on tühi' : 'Tulemusi ei leitud'}
+            </h3>
+            <p className="text-slate-500">
+              {passwordChanges.length === 0 
+                ? 'Parooli vahetused ilmuvad siia' 
+                : 'Proovi teisi filtreid'
+              }
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <AnimatePresence>
+              {filteredChanges.map((change, index) => (
+                <PasswordHistoryItem
+                  key={change.id}
+                  change={change}
+                  index={index}
+                />
+              ))}
+            </AnimatePresence>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
